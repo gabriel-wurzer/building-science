@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Occupancy Sensor</title>
+    <style>
+        body {
+            background-color: #f0f0f0;
+        }
+
+        body>div {
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            margin: 0;
+        }
+
+        video,
+        canvas {
+            border: 1px solid #ccc;
+            border-radius: 8px;
+            margin: 10px;
+        }
+
+        #controls {
+            margin-bottom: 10px;
+
+        }
+
+        #threshold {
+            width: 300px;
+        }
+
+        #ui {}
+
+        #room {
+            font-family: Arial, sans-serif;
+            font-size: 120px;
+            color: green;
+            margin-bottom: -30px;
+        }
+
+
+        #roomlabel {
+            font-family: Arial, sans-serif;
+            font-size: 80px;
+            color: white;
+            background: green;
+            padding: 10px;
+        }
+
+        #occupancy {
+            font-family: Arial, sans-serif;
+            font-size: 120px;
+            color: black;
+            padding: 10px;
+        }
+
+        @keyframes plus1 {
+            0% {
+                opacity: 1;
+                top: 400px;
+            }
+
+            100% {
+                opacity: 0;
+                top: -50px;
+            }
+        }
+
+        .plus1 {
+            animation: plus1 1s forwards;
+            position: absolute;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="ui">
+        <div id="room">room</div>
+        <div id="roomlabel">AE U1-5</div>
+        <div id="occupancy">0</div>
+    </div>
+    <div id="development">
+        <div>live video:</div>
+        <video id="video" autoplay playsinline></video>
+        <div>background image:</div>
+        <canvas id="canvas"></canvas>
+        <div id="controls">
+            <button id="capture">update</button>
+        </div>
+        <div>detected change:</div>
+        <canvas id="pcanvas"></canvas>
+        <div>detection threshold <input type="range" min="1" max="100" value="20" class="slider" id="threshold"
+                onchange="updateThreshold()"><span id="pct"></span>
+        </div>
+    </div>
+    <script>
+        const state = {
+            left: false,
+            right: false,
+            lastLeft: -1,
+            lastRight: -1,
+            occupancy: 0
+        }
+        const occupancy = document.getElementById('occupancy')
+        const threshold = document.getElementById('threshold')
+        const pct = document.getElementById('pct')
+        const video = document.getElementById('video')
+        let calibrated = false
+        const canvas = document.getElementById('canvas')
+        const captureButton = document.getElementById('capture')
+        const context = canvas.getContext('2d')
+        const pcanvas = document.getElementById('pcanvas')
+        const pcontext = pcanvas.getContext('2d')
+
+        // Threshold and sensitivity settings                
+        threshold.addEventListener("input", (event) => {
+            updateThreshold()
+        })
+        const changeThreshold = 50 // Minimum pixel intensity difference to consider a change        
+        pct.innerHTML = threshold.value + "%"
+
+        // Access the front camera
+        navigator.mediaDevices.getUserMedia({
+            video: { facingMode: 'user' } // 'user' for front camera, 'environment' for back camera
+        })
+            .then((stream) => {
+                video.srcObject = stream
+                video.onloadedmetadata = () => {
+                    video.play()
+                    if (!calibrated) {
+                        calibrate()
+                    }
+                    processFrames()
+                }
+            })
+            .catch((err) => {
+                console.error('Error accessing the camera: ', err)
+                alert('Could not access the camera. Please check your permissions.')
+            })
+
+        function calibrate () {
+            canvas.width = video.videoWidth
+            canvas.height = video.videoHeight
+            context.drawImage(video, 0, 0, canvas.width, canvas.height)
+            calibrated = true
+        }
+
+        function updateThreshold () {
+            const significantChangeThresholdPct = threshold.value // Number of changed pixels, in percent of the canvas, to signify a "big change"
+            pct.innerHTML = significantChangeThresholdPct + "%"
+        }
+
+        function processFrames () {
+            // Set canvas dimensions to match the video
+            pcanvas.width = video.videoWidth
+            pcanvas.height = video.videoHeight
+
+            // Draw the current video frame on the canvas
+            pcontext.drawImage(video, 0, 0, pcanvas.width, pcanvas.height)
+
+            // Access the current frame's pixels
+            const frame = pcontext.getImageData(0, 0, pcanvas.width, pcanvas.height)
+
+            // Access the ground truth's pixels
+            const previousFrame = context.getImageData(0, 0, canvas.width, canvas.height)
+
+            // calculate difference
+            const w = pcanvas.width
+            const w_2 = w / 2
+            const w_4 = w / 4
+            const h = pcanvas.height
+            const h_2 = h / 2
+            let changedPixelsLeft = 0
+            let changedPixelsRight = 0
+            for (let i = 0; i < frame.data.length; i += 4) {
+                const rDiff = Math.abs(frame.data[i] - previousFrame.data[i])       // Red
+                const gDiff = Math.abs(frame.data[i + 1] - previousFrame.data[i + 1]) // Green
+                const bDiff = Math.abs(frame.data[i + 2] - previousFrame.data[i + 2]) // Blue
+
+                // Compute overall pixel intensity difference
+                const intensityDiff = (rDiff + gDiff + bDiff) / 3
+
+                // Apply threshold
+                if (intensityDiff > changeThreshold) {
+                    frame.data[i] = 255 // Mark pixel as white
+                    frame.data[i + 1] = 255
+                    frame.data[i + 2] = 255
+                    const index = i / 4 // RGBA
+                    const y = Math.floor(index / w)
+                    const x = index - (y * w)
+                    if (x < w_2) {
+                        changedPixelsLeft++
+                    } else {
+                        changedPixelsRight++
+                    }
+                } else {
+                    frame.data[i] = 0 // Mark pixel as black
+                    frame.data[i + 1] = 0
+                    frame.data[i + 2] = 0
+                }
+            }
+
+            // Put the processed frame back onto the canvas
+            pcontext.putImageData(frame, 0, 0)
+            pcontext.strokeStyle = "red"
+            pcontext.lineWidth = 1
+            pcontext.beginPath()
+            pcontext.moveTo(w_2, 0)
+            pcontext.lineTo(w_2, h)
+            pcontext.stroke()
+
+            // compute percentage
+            const totalPixelsLeftRight = (w * h) / 2
+            const leftPixelsPercentage = Math.round((changedPixelsLeft / totalPixelsLeftRight) * 100)
+            const rightPixelsPercentage = Math.round((changedPixelsRight / totalPixelsLeftRight) * 100)
+
+            const significantChangeThresholdPct = threshold.value // Number of changed pixels, in percent of the canvas, to signify a "big change"
+            const leftDetected = leftPixelsPercentage >= significantChangeThresholdPct
+            const rightDetected = rightPixelsPercentage >= significantChangeThresholdPct
+
+            // and render to screen
+            pcontext.textAlign = "center"
+            pcontext.textBaseline = "middle"
+            pcontext.font = "72px serif"
+            pcontext.fillStyle = leftDetected ? "green" : "red"
+            pcontext.fillText(leftPixelsPercentage + "%", w_4, h_2)
+            pcontext.strokeStyle = "black"
+            pcontext.strokeText(leftPixelsPercentage + "%", w_4, h_2)
+            pcontext.fillStyle = rightDetected ? "green" : "red"
+            pcontext.fillText(rightPixelsPercentage + "%", w_2 + w_4, h_2)
+            pcontext.strokeStyle = "black"
+            pcontext.strokeText(rightPixelsPercentage + "%", w_2 + w_4, h_2)
+
+            // process events
+            if (leftDetected) {
+                const hadRight = Date.now() - state.lastRight < 1000 // 1s
+                if (!state.left && hadRight) {
+                    // == -1 ==>
+                    state.occupancy--
+                    if (state.occupancy >= 0) {
+                        occupancy.innerHTML = state.occupancy + '<span class="plus1">-1</span>'
+                    } else {
+                        state.occupancy = 0
+                    }
+                    //if you want to, you can also store the value somewhere:
+                    //fetch('http://some-server/set-occupancy?value=' + state.occupancy, { method: 'GET' })
+                }
+                state.left = true
+                state.lastLeft = Date.now()
+            } else {
+                state.left = false
+            }
+
+            if (rightDetected) {
+                const hadLeft = Date.now() - state.lastLeft < 1000 // 1s
+                if (!state.right && hadLeft) {
+                    // <== +1 ==
+                    state.occupancy++
+                    occupancy.innerHTML = state.occupancy + '<span class="plus1">+1</span>'
+                    //if you want to, you can also store the value somewhere:
+                    //fetch('http://some-server/set-occupancy?value=' + state.occupancy, { method: 'GET' })
+                }
+                state.right = true
+                state.lastRight = Date.now()
+            } else {
+                state.right = false
+            }
+
+            // Call this function again for the next frame
+            requestAnimationFrame(processFrames)
+        }
+
+        // Capture video frame to canvas
+        captureButton.addEventListener('click', calibrate)
+
+    </script>
+</body>
+
+</html>
